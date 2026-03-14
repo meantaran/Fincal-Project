@@ -1,0 +1,688 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area
+} from 'recharts';
+import {
+Calculator,
+TrendingUp,
+PieChart,
+Target,
+UserCheck,
+History as HistoryIcon,
+Menu,
+X,
+Download,
+ChevronRight,
+Info,
+DollarSign,
+Printer
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from 'firebase/firestore';
+
+// --- CONFIGURATION & FIREBASE ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'fin-calc-pro';
+
+// --- FINANCIAL CALCULATORS ENGINE ---
+const FinanceEngine = {
+calculateSIP: (monthly, rate, years) => {
+const r = rate / 12 / 100;
+const n = Math.max(0, years * 12);
+const futureValue = r === 0 ? monthly * n : monthly * ((Math.pow(1 + r, n) - 1) / r) * (1 + r);
+const totalInvested = monthly * n;
+return {
+futureValue: Math.round(futureValue || 0),
+totalInvestment: Math.round(totalInvested || 0),
+returns: Math.round((futureValue - totalInvested) || 0)
+};
+},
+
+calculateSWP: (initial, withdrawal, rate, years) => {
+const r = rate / 12 / 100;
+const n = Math.max(0, years * 12);
+let balance = initial;
+const schedule = [];
+
+for (let i = 1; i <= n; i++) { balance=(balance * (1 + r)) - withdrawal; if (balance <=0) { balance=0; if (i % 12===0 ||
+    i===n) schedule.push({ year: Math.ceil(i / 12), balance: 0 }); break; } if (i % 12===0) schedule.push({ year: i /
+    12, balance: Math.round(balance) }); } return { remainingBalance: Math.round(balance || 0), totalWithdrawn:
+    withdrawal * (schedule.length> 0 ? (schedule[schedule.length - 1].year * 12) : 0),
+    schedule
+    };
+    },
+
+    calculateTopUpSIP: (monthly, rate, years, topUpPct) => {
+    const r = rate / 12 / 100;
+    let totalValue = 0;
+    let totalInvested = 0;
+    let currentMonthly = monthly;
+    const yearlyData = [];
+
+    for (let y = 1; y <= years; y++) { for (let m=1; m <=12; m++) { totalValue=(totalValue + currentMonthly) * (1 + r);
+        totalInvested +=currentMonthly; } yearlyData.push({ year: y, value: Math.round(totalValue), invested:
+        totalInvested }); currentMonthly=currentMonthly * (1 + (topUpPct / 100)); } return { futureValue:
+        Math.round(totalValue || 0), totalInvestment: Math.round(totalInvested || 0), returns: Math.round((totalValue -
+        totalInvested) || 0), yearlyData }; }, calculateGoal: (target, rate, years)=> {
+        const r = rate / 12 / 100;
+        const n = Math.max(1, years * 12);
+        const denom = r === 0 ? n : (((Math.pow(1 + r, n) - 1) / r) * (1 + r));
+        const requiredMonthly = target / denom;
+        return {
+        requiredMonthly: Math.round(requiredMonthly || 0)
+        };
+        },
+
+        calculateRetirement: (currentAge, retireAge, expenses, returnRate) => {
+        const yearsToRetire = Math.max(0, retireAge - currentAge);
+        const lifeExpectancy = 85;
+        const yearsInRetirement = Math.max(0, lifeExpectancy - retireAge);
+        const inflation = 0.06;
+
+        const monthlyExpensesAtRetirement = expenses * Math.pow(1 + inflation, yearsToRetire);
+        const postRetireReturn = 0.08;
+        const realRate = (1 + postRetireReturn) / (1 + inflation) - 1;
+        const monthlyRealRate = realRate / 12;
+        const monthsInRetirement = yearsInRetirement * 12;
+
+        const corpusNeeded = monthlyRealRate === 0
+        ? monthlyExpensesAtRetirement * monthsInRetirement
+        : monthlyExpensesAtRetirement * ((1 - Math.pow(1 + monthlyRealRate, -monthsInRetirement)) / monthlyRealRate);
+
+        const r = returnRate / 12 / 100;
+        const n = yearsToRetire * 12;
+        const denom = n === 0 ? 1 : (r === 0 ? n : (((Math.pow(1 + r, n) - 1) / r) * (1 + r)));
+        const monthlySIP = corpusNeeded / denom;
+
+        return {
+        corpusNeeded: Math.round(corpusNeeded || 0),
+        monthlyInvestment: Math.round(monthlySIP || 0),
+        expensesAtRetirement: Math.round(monthlyExpensesAtRetirement || 0)
+        };
+        }
+        };
+
+        // --- COMPONENTS ---
+
+        const Navbar = ({ activeTab, setActiveTab, setSidebarOpen }) => (
+        <nav
+            className="bg-[#224c87] text-white p-4 sticky top-0 z-50 flex justify-between items-center shadow-lg print:hidden">
+            <div className="flex items-center gap-3">
+                <button onClick={()=> setSidebarOpen(true)} className="lg:hidden p-1 hover:bg-white/10 rounded">
+                    <Menu size={24} />
+                </button>
+                <div className="flex items-center gap-2 cursor-pointer" onClick={()=> setActiveTab('dashboard')}>
+                    <TrendingUp className="text-[#da3832]" />
+                    <span className="font-bold text-xl tracking-tight hidden sm:inline">FINANCIAL PRO</span>
+                </div>
+            </div>
+            <div className="flex items-center gap-6">
+                <span className="text-sm opacity-80 hidden md:block">Investment Planning Suite</span>
+                <div className="h-8 w-8 rounded-full bg-white/20 flex items-center justify-center">
+                    <UserCheck size={18} />
+                </div>
+            </div>
+        </nav>
+        );
+
+        const Sidebar = ({ activeTab, setActiveTab, isOpen, setIsOpen }) => {
+        const menuItems = [
+        { id: 'dashboard', label: 'Dashboard', icon: PieChart },
+        { id: 'sip', label: 'SIP Calculator', icon: Calculator },
+        { id: 'swp', label: 'SWP Calculator', icon: HistoryIcon },
+        { id: 'topup', label: 'Top-Up SIP', icon: TrendingUp },
+        { id: 'goal', label: 'Goal Planner', icon: Target },
+        { id: 'retirement', label: 'Retirement', icon: UserCheck },
+        { id: 'history', label: 'My History', icon: HistoryIcon },
+        ];
+
+        return (
+        <>
+            {isOpen && (
+            <div className="fixed inset-0 bg-black/50 z-50 lg:hidden print:hidden" onClick={()=> setIsOpen(false)} />
+                )}
+                <aside className={`fixed lg:static inset-y-0 left-0 w-64 bg-white border-r border-gray-200 transform
+                    transition-transform duration-300 z-50 print:hidden ${isOpen ? 'translate-x-0'
+                    : '-translate-x-full lg:translate-x-0' }`}>
+                    <div className="p-6 flex justify-between items-center lg:hidden">
+                        <span className="font-bold text-[#224c87]">Menu</span>
+                        <button onClick={()=> setIsOpen(false)}>
+                            <X size={20} />
+                        </button>
+                    </div>
+                    <div className="py-4">
+                        {menuItems.map((item) => (
+                        <button key={item.id} onClick={()=> { setActiveTab(item.id); setIsOpen(false); }}
+                            className={`w-full flex items-center gap-4 px-6 py-4 text-left transition-colors ${activeTab
+                            === item.id
+                            ? 'bg-[#224c87]/5 text-[#224c87] border-r-4 border-[#224c87] font-semibold'
+                            : 'text-gray-600 hover:bg-gray-50'
+                            }`}
+                            >
+                            <item.icon size={20} />
+                            {item.label}
+                        </button>
+                        ))}
+                    </div>
+                </aside>
+        </>
+        );
+        };
+
+        const CalculatorCard = ({ title, icon: Icon, description, onClick }) => (
+        <div onClick={onClick}
+            className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-all cursor-pointer group">
+            <div
+                className="h-12 w-12 rounded-lg bg-[#224c87]/10 flex items-center justify-center text-[#224c87] mb-4 group-hover:bg-[#224c87] group-hover:text-white transition-colors">
+                <Icon size={24} />
+            </div>
+            <h3 className="text-lg font-bold text-gray-800 mb-2">{title}</h3>
+            <p className="text-sm text-gray-500 mb-4">{description}</p>
+            <div className="flex items-center text-[#224c87] text-sm font-semibold">
+                Calculate Now
+                <ChevronRight size={16} />
+            </div>
+        </div>
+        );
+
+        const ResultField = ({ label, value, isCurrency = true }) => {
+        const displayValue = (value !== undefined && value !== null) ? value : 0;
+
+        return (
+        <div className="flex flex-col p-4 bg-gray-50 rounded-lg border border-gray-100">
+            <span className="text-xs text-gray-500 uppercase font-bold tracking-wider mb-1">{label}</span>
+            <span className="text-xl font-bold text-[#224c87]">
+                {isCurrency ? `₹${Number(displayValue).toLocaleString('en-IN')}` : displayValue}
+            </span>
+        </div>
+        );
+        };
+
+        // --- MAIN APP COMPONENT ---
+        export default function App() {
+        const [activeTab, setActiveTab] = useState('dashboard');
+        const [sidebarOpen, setSidebarOpen] = useState(false);
+        const [user, setUser] = useState(null);
+        const [history, setHistory] = useState([]);
+        const [results, setResults] = useState(null);
+
+        const [inputs, setInputs] = useState({
+        monthly: 5000,
+        rate: 12,
+        years: 10,
+        initial: 1000000,
+        withdrawal: 10000,
+        topUp: 10,
+        target: 5000000,
+        currentAge: 30,
+        retireAge: 60,
+        expenses: 40000
+        });
+
+        useEffect(() => {
+        const initAuth = async () => {
+        try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+        await signInAnonymously(auth);
+        }
+        } catch (err) {
+        console.error("Auth error:", err);
+        }
+        };
+        initAuth();
+        const unsubscribe = onAuthStateChanged(auth, setUser);
+        return () => unsubscribe();
+        }, []);
+
+        useEffect(() => {
+        if (!user) return;
+        const historyQuery = query(collection(db, 'artifacts', appId, 'users', user.uid, 'history'));
+        const unsubscribe = onSnapshot(historyQuery, (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setHistory(data.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)));
+        }, (err) => console.error("History fetch error", err));
+        return () => unsubscribe();
+        }, [user]);
+
+        const handleCalculate = async () => {
+        let res = null;
+        try {
+        switch (activeTab) {
+        case 'sip':
+        res = FinanceEngine.calculateSIP(inputs.monthly, inputs.rate, inputs.years);
+        break;
+        case 'swp':
+        res = FinanceEngine.calculateSWP(inputs.initial, inputs.withdrawal, inputs.rate, inputs.years);
+        break;
+        case 'topup':
+        res = FinanceEngine.calculateTopUpSIP(inputs.monthly, inputs.rate, inputs.years, inputs.topUp);
+        break;
+        case 'goal':
+        res = FinanceEngine.calculateGoal(inputs.target, inputs.rate, inputs.years);
+        break;
+        case 'retirement':
+        res = FinanceEngine.calculateRetirement(inputs.currentAge, inputs.retireAge, inputs.expenses, inputs.rate);
+        break;
+        default:
+        break;
+        }
+        setResults(res);
+
+        if (user && res) {
+        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'history'), {
+        type: activeTab,
+        inputs: { ...inputs },
+        results: res,
+        timestamp: serverTimestamp()
+        });
+        }
+        } catch (e) {
+        console.error("Calculation/Save error", e);
+        }
+        };
+
+        const chartData = useMemo(() => {
+        if (!results) return [];
+        try {
+        if (activeTab === 'sip' || activeTab === 'topup') {
+        const data = [];
+        const years = inputs.years;
+        for (let i = 0; i <= years; i++) { const val=activeTab==='sip' ? FinanceEngine.calculateSIP(inputs.monthly,
+            inputs.rate, i) : FinanceEngine.calculateTopUpSIP(inputs.monthly, inputs.rate, i, inputs.topUp); data.push({
+            name: `Yr ${i}`, Investment: val.totalInvestment, Value: val.futureValue }); } return data; } if
+            (activeTab==='swp' && results.schedule) { return results.schedule.map(s=> ({ name: `Yr ${s.year}`, Balance:
+            s.balance }));
+            }
+            } catch (e) {
+            console.error("Chart data error", e);
+            }
+            return [];
+            }, [results, activeTab, inputs]);
+
+            const handleExportPDF = () => {
+            window.print();
+            };
+
+            const renderDashboard = () => (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 p-6">
+                <CalculatorCard title="SIP Calculator" icon={Calculator}
+                    description="Estimate future value of monthly mutual funds." onClick={()=> setActiveTab('sip')} />
+                    <CalculatorCard title="SWP Calculator" icon={HistoryIcon}
+                        description="Plan withdrawals while staying invested." onClick={()=> setActiveTab('swp')} />
+                        <CalculatorCard title="Top-Up SIP" icon={TrendingUp}
+                            description="Calculate growth with annual SIP increases." onClick={()=>
+                            setActiveTab('topup')} />
+                            <CalculatorCard title="Goal Planner" icon={Target}
+                                description="Find how much to save for specific targets." onClick={()=>
+                                setActiveTab('goal')} />
+                                <CalculatorCard title="Retirement Planner" icon={UserCheck}
+                                    description="Plan corpus needed for golden years." onClick={()=>
+                                    setActiveTab('retirement')} />
+                                    <div
+                                        className="bg-[#224c87] text-white p-6 rounded-xl flex flex-col justify-between overflow-hidden relative shadow-lg">
+                                        <DollarSign className="absolute -bottom-4 -right-4 w-32 h-32 opacity-10" />
+                                        <div>
+                                            <h3 className="text-xl font-bold mb-2">Smart History</h3>
+                                            <p className="text-sm opacity-80">Track your saved calculations across all
+                                                your sessions.</p>
+                                        </div>
+                                        <button onClick={()=> setActiveTab('history')} className="mt-6 bg-white
+                                            text-[#224c87] px-4 py-2 rounded-lg font-bold text-sm w-fit shadow-md
+                                            hover:bg-gray-100 transition-colors">
+                                            View History
+                                        </button>
+                                    </div>
+            </div>
+            );
+
+            const renderCalculatorForm = () => (
+            <div className="flex flex-col lg:flex-row gap-8 p-6 max-w-7xl mx-auto">
+                <div
+                    className="w-full lg:w-1/3 bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-fit print:hidden">
+                    <div className="flex items-center gap-2 mb-6">
+                        <Calculator className="text-[#da3832]" />
+                        <h2 className="text-xl font-bold text-[#224c87] capitalize">{activeTab} Calculator</h2>
+                    </div>
+
+                    <div className="space-y-5">
+                        {(activeTab === 'sip' || activeTab === 'topup' || activeTab === 'goal') && (
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                {activeTab === 'goal' ? 'Target Amount' : 'Monthly Investment'}
+                            </label>
+                            <div className="relative">
+                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">₹</span>
+                                <input type="number"
+                                    className="w-full pl-8 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-[#224c87] outline-none"
+                                    value={activeTab==='goal' ? inputs.target : inputs.monthly} onChange={(e)=>
+                                setInputs({ ...inputs, [activeTab === 'goal' ? 'target' : 'monthly']:
+                                Number(e.target.value) })}
+                                />
+                            </div>
+                        </div>
+                        )}
+
+                        {activeTab === 'swp' && (
+                        <>
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-700 mb-2">Initial
+                                    Investment</label>
+                                <input type="number" className="w-full px-4 py-2 border rounded-lg outline-none"
+                                    value={inputs.initial} onChange={(e)=> setInputs({ ...inputs, initial:
+                                Number(e.target.value) })} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-700 mb-2">Monthly
+                                    Withdrawal</label>
+                                <input type="number" className="w-full px-4 py-2 border rounded-lg outline-none"
+                                    value={inputs.withdrawal} onChange={(e)=> setInputs({ ...inputs, withdrawal:
+                                Number(e.target.value) })} />
+                            </div>
+                        </>
+                        )}
+
+                        {activeTab === 'retirement' && (
+                        <>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Current
+                                        Age</label>
+                                    <input type="number" className="w-full px-4 py-2 border rounded-lg"
+                                        value={inputs.currentAge} onChange={(e)=> setInputs({ ...inputs, currentAge:
+                                    Number(e.target.value) })} />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Retire Age</label>
+                                    <input type="number" className="w-full px-4 py-2 border rounded-lg"
+                                        value={inputs.retireAge} onChange={(e)=> setInputs({ ...inputs, retireAge:
+                                    Number(e.target.value) })} />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-700 mb-2">Monthly Expenses
+                                    Today</label>
+                                <input type="number" className="w-full px-4 py-2 border rounded-lg"
+                                    value={inputs.expenses} onChange={(e)=> setInputs({ ...inputs, expenses:
+                                Number(e.target.value) })} />
+                            </div>
+                        </>
+                        )}
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">Expected Return
+                                (%)</label>
+                            <input type="range" min="1" max="30" step="0.5" className="w-full accent-[#224c87]"
+                                value={inputs.rate} onChange={(e)=> setInputs({ ...inputs, rate: Number(e.target.value)
+                            })} />
+                            <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>1%</span><span
+                                    className="font-bold text-[#224c87]">{inputs.rate}%</span><span>30%</span>
+                            </div>
+                        </div>
+
+                        {activeTab !== 'retirement' && (
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">Time Period
+                                (Years)</label>
+                            <input type="range" min="1" max="50" className="w-full accent-[#224c87]"
+                                value={inputs.years} onChange={(e)=> setInputs({ ...inputs, years:
+                            Number(e.target.value) })} />
+                            <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>1 Yr</span><span className="font-bold text-[#224c87]">{inputs.years}
+                                    Yrs</span><span>50 Yrs</span>
+                            </div>
+                        </div>
+                        )}
+
+                        {activeTab === 'topup' && (
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">Annual Top-up (%)</label>
+                            <input type="number" className="w-full px-4 py-2 border rounded-lg" value={inputs.topUp}
+                                onChange={(e)=> setInputs({ ...inputs, topUp: Number(e.target.value) })} />
+                        </div>
+                        )}
+
+                        <button onClick={handleCalculate}
+                            className="w-full py-3 bg-[#da3832] text-white rounded-lg font-bold hover:bg-[#b02d28] transition-colors flex items-center justify-center gap-2 mt-4">
+                            Calculate Results
+                        </button>
+                    </div>
+                </div>
+
+                <div className="w-full lg:w-2/3 flex flex-col gap-6">
+                    {results ? (
+                    <div
+                        className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 print:shadow-none print:border-none print:p-0">
+                        <h3
+                            className="text-lg font-bold text-gray-800 mb-6 flex justify-between items-center print:hidden">
+                            Calculation Summary
+                            <button onClick={handleExportPDF}
+                                className="bg-[#224c87] text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 hover:bg-[#1a3a66] transition-colors">
+                                <Download size={16} /> Export Report (PDF)
+                            </button>
+                        </h3>
+
+                        {/* Print Header */}
+                        <div
+                            className="hidden print:flex justify-between items-center border-b-2 border-[#224c87] pb-4 mb-8">
+                            <div>
+                                <h1 className="text-2xl font-bold text-[#224c87]">FINANCIAL PRO REPORT</h1>
+                                <p className="text-sm text-gray-600 capitalize">{activeTab} Analysis - {new
+                                    Date().toLocaleDateString()}</p>
+                            </div>
+                            <TrendingUp className="text-[#da3832]" size={32} />
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+                            {(activeTab === 'sip' || activeTab === 'topup') && (
+                            <>
+                                <ResultField label="Total Invested" value={results.totalInvestment} />
+                                <ResultField label="Est. Returns" value={results.returns} />
+                                <ResultField label="Total Value" value={results.futureValue} />
+                            </>
+                            )}
+                            {activeTab === 'swp' && (
+                            <>
+                                <ResultField label="Initial Principal" value={inputs.initial} />
+                                <ResultField label="Total Withdrawn" value={results.totalWithdrawn} />
+                                <ResultField label="Remaining Balance" value={results.remainingBalance} />
+                            </>
+                            )}
+                            {activeTab === 'goal' && (
+                            <>
+                                <ResultField label="Target Goal" value={inputs.target} />
+                                <ResultField label="Monthly SIP Required" value={results.requiredMonthly} />
+                            </>
+                            )}
+                            {activeTab === 'retirement' && (
+                            <>
+                                <ResultField label="Corpus Needed" value={results.corpusNeeded} />
+                                <ResultField label="Monthly SIP Needed" value={results.monthlyInvestment} />
+                                <ResultField label="Monthly Expenses" value={results.expensesAtRetirement} />
+                            </>
+                            )}
+                        </div>
+
+                        {/* Input Recap for Print */}
+                        <div className="hidden print:block bg-gray-50 p-4 rounded-lg border border-gray-200 mb-8">
+                            <h4 className="text-sm font-bold text-gray-700 uppercase mb-3 tracking-wider">Parameters
+                                Used</h4>
+                            <div className="grid grid-cols-3 gap-4 text-xs">
+                                {Object.entries(inputs).map(([key, val]) => (
+                                <div key={key}>
+                                    <span className="text-gray-500 capitalize">{key.replace(/([A-Z])/g, ' $1').trim()}:
+                                    </span>
+                                    <span className="font-bold">{key === 'rate' || key === 'topUp' ? `${val}%` :
+                                        `₹${val.toLocaleString()}`}</span>
+                                </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {(activeTab !== 'goal') && chartData.length > 0 && (
+                        <div className="mt-8 h-80 w-full print:h-[400px]">
+                            <h4 className="hidden print:block text-sm font-bold text-gray-700 uppercase mb-4">Growth
+                                Projection</h4>
+                            <ResponsiveContainer width="100%" height="100%">
+                                <AreaChart data={chartData}>
+                                    <defs>
+                                        <linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#224c87" stopOpacity={0.1} />
+                                            <stop offset="95%" stopColor="#224c87" stopOpacity={0} />
+                                        </linearGradient>
+                                    </defs>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                    <XAxis dataKey="name" fontSize={10} tickMargin={10} />
+                                    <YAxis fontSize={10} tickFormatter={(val)=> `₹${(val / 100000).toFixed(0)}L`} />
+                                        <Tooltip formatter={(val)=> `₹${Number(val).toLocaleString()}`} />
+                                            {activeTab === 'swp' ? (
+                                            <Area type="monotone" dataKey="Balance" stroke="#224c87" fillOpacity={1}
+                                                fill="url(#colorVal)" strokeWidth={3} isAnimationActive={false} />
+                                            ) : (
+                                            <>
+                                                <Area type="monotone" dataKey="Value" stroke="#224c87" fillOpacity={1}
+                                                    fill="url(#colorVal)" strokeWidth={3} isAnimationActive={false} />
+                                                <Area type="monotone" dataKey="Investment" stroke="#da3832"
+                                                    fillOpacity={0} strokeWidth={2} strokeDasharray="5 5"
+                                                    isAnimationActive={false} />
+                                            </>
+                                            )}
+                                </AreaChart>
+                            </ResponsiveContainer>
+                        </div>
+                        )}
+
+                        <div
+                            className="mt-8 flex items-start gap-2 p-4 bg-gray-50 rounded-lg border-l-4 border-amber-500 print:bg-white print:border print:border-gray-200">
+                            <Info size={18} className="text-amber-600 flex-shrink-0 mt-0.5 print:hidden" />
+                            <p className="text-xs text-gray-600 italic">
+                                Disclaimer: These projections are based on the parameters provided. Mutual fund
+                                investments are subject to market risks. Please read all scheme related documents
+                                carefully before investing.
+                            </p>
+                        </div>
+                    </div>
+                    ) : (
+                    <div
+                        className="bg-white p-12 rounded-xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center text-center print:hidden">
+                        <Calculator size={48} className="text-gray-300 mb-4" />
+                        <h3 className="text-xl font-bold text-gray-400">Ready to calculate</h3>
+                        <p className="text-gray-400 max-w-xs mt-2">Adjust inputs and click calculate to view
+                            projections.</p>
+                    </div>
+                    )}
+                </div>
+            </div>
+            );
+
+            const renderHistory = () => (
+            <div className="p-6 max-w-5xl mx-auto print:hidden">
+                <div className="flex items-center justify-between mb-8">
+                    <h2 className="text-2xl font-bold text-[#224c87]">Calculation History</h2>
+                    <HistoryIcon className="text-[#919090]" />
+                </div>
+                <div className="grid gap-4">
+                    {history.length > 0 ? history.map((item) => (
+                    <div key={item.id}
+                        className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-wrap justify-between items-center gap-4">
+                        <div className="flex items-center gap-4">
+                            <div
+                                className="h-10 w-10 rounded-full bg-[#224c87]/10 flex items-center justify-center text-[#224c87]">
+                                <Calculator size={20} />
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-gray-800 capitalize">{item.type} Calculator</h4>
+                                <p className="text-xs text-gray-500">{item.timestamp?.toDate().toLocaleDateString()}</p>
+                            </div>
+                        </div>
+                        <div className="flex gap-8">
+                            <div className="text-center">
+                                <p className="text-[10px] text-gray-500 uppercase font-bold">Basis</p>
+                                <p className="font-semibold text-gray-800">₹{(item.inputs?.monthly ||
+                                    item.inputs?.initial || item.inputs?.target || 0).toLocaleString()}</p>
+                            </div>
+                            <div className="text-center">
+                                <p className="text-[10px] text-gray-500 uppercase font-bold">Result</p>
+                                <p className="font-semibold text-[#224c87]">₹{(item.results?.futureValue ||
+                                    item.results?.requiredMonthly || item.results?.corpusNeeded || 0).toLocaleString()}
+                                </p>
+                            </div>
+                        </div>
+                        <button onClick={()=> { setInputs(item.inputs); setResults(item.results);
+                            setActiveTab(item.type); }} className="px-4 py-2 text-sm font-semibold text-[#da3832] border
+                            border-[#da3832] rounded-lg hover:bg-[#da3832] hover:text-white transition-colors">
+                            Reload
+                        </button>
+                    </div>
+                    )) : <div className="text-center py-20 bg-white rounded-xl">
+                        <p className="text-gray-400">No history found.</p>
+                    </div>}
+                </div>
+            </div>
+            );
+
+            return (
+            <div className="min-h-screen bg-[#f3f4f6] font-sans print:bg-white">
+                <style>
+                    {
+                        ` @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap');
+
+                        body {
+                            font-family: 'Montserrat', sans-serif;
+                        }
+
+                        @media print {
+                            @page {
+                                size: A4;
+                                margin: 2cm;
+                            }
+
+                            body {
+                                background-color: white !important;
+                            }
+
+                            .recharts-responsive-container {
+                                width: 100% !important;
+                                height: 400px !important;
+                            }
+
+                            main {
+                                margin: 0 !important;
+                                padding: 0 !important;
+                            }
+
+                            .flex {
+                                display: block !important;
+                            }
+
+                            * {
+                                -webkit-print-color-adjust: exact !important;
+                                print-color-adjust: exact !important;
+                            }
+                        }
+
+                        `
+                    }
+                </style>
+                <Navbar activeTab={activeTab} setActiveTab={setActiveTab} setSidebarOpen={setSidebarOpen} />
+                <div className="flex">
+                    <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} isOpen={sidebarOpen}
+                        setIsOpen={setSidebarOpen} />
+                    <main className="flex-1 transition-all duration-300">
+                        <div className="p-4 lg:p-8">
+                            {activeTab === 'dashboard' && renderDashboard()}
+                            {activeTab === 'history' && renderHistory()}
+                            {['sip', 'swp', 'topup', 'goal', 'retirement'].includes(activeTab) &&
+                            renderCalculatorForm()}
+                        </div>
+                    </main>
+                </div>
+            </div>
+            );
+            }
